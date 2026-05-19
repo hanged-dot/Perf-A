@@ -52,7 +52,20 @@
     - [Quick Start](#quick-start)
     - [What Gets Installed](#what-gets-installed)
   - [8. Demo Deployment Steps](#8-demo-deployment-steps)
+    - [a. Configuration Set-up](#a-configuration-set-up)
+    - [b. Data Preparation](#b-data-preparation)
   - [9. Demo Description](#9-demo-description)
+    - [a. Execution Procedure](#a-execution-procedure)
+      - [Step 1: Access Grafana Cloud](#step-1-access-grafana-cloud)
+      - [Step 2: Verify Metrics Connection](#step-2-verify-metrics-connection)
+      - [Step 3: Use Grafana Assistant](#step-3-use-grafana-assistant)
+      - [Example AI Prompts:](#example-ai-prompts)
+      - [Where to Type Queries in Grafana Cloud](#where-to-type-queries-in-grafana-cloud)
+    - [b. Results presentation](#b-results-presentation)
+      - [1. **Create a dashboard showing Kubernetes cluster status**](#1-create-a-dashboard-showing-kubernetes-cluster-status)
+      - [2. **Create a dashboard showing the health of all microservices**](#2-create-a-dashboard-showing-the-health-of-all-microservices)
+      - [3. **Identify bottlenecks**](#3-identify-bottlenecks)
+      - [4. **Service memory usage**](#4-service-memory-usage)
   - [10. Summary – Conclusions](#10-summary--conclusions)
   - [11. References](#11-references)
     - [Official Documentation](#official-documentation)
@@ -115,7 +128,14 @@ This project uses a hybrid cloud-local architecture:
 
 #### Grafana Agent
 - Purpose: Lightweight metrics collector and forwarder between local and cloud
-- Role in Project: Scrapes metrics from local Prometheus and pushes to Grafana Cloud
+- Role in Project: Federates selected metrics from the local Prometheus instance and pushes them to Grafana Cloud using remote write
+- Metrics Scope:
+  - Kubernetes cluster health and pod status metrics
+  - Container CPU, memory, and network metrics for active namespaces
+  - Node-level CPU, memory, and filesystem metrics
+  - API server operational health metrics
+  - Application gRPC and HTTP performance metrics from the demo microservices
+- Deployment: Runs in a dedicated `grafana-agent` namespace as a Kubernetes Deployment with a ConfigMap-based configuration
 - Documentation: https://grafana.com/docs/agent/
 
 #### Helm
@@ -152,7 +172,12 @@ The observability stack consists of:
 5. AI Analysis: Grafana Assistant provides intelligent insights
 
 Monitored Metrics:
- To be determined
+- Microservice performance metrics, including gRPC handling duration and request counters
+- HTTP request duration and total request metrics exposed by the application
+- Container resource usage metrics for CPU, memory, and network activity
+- Pod, deployment, namespace, and node health metrics from Kubernetes
+- Node resource metrics such as CPU utilization, memory availability, and filesystem usage
+- API server request and availability metrics
 
 ### Visualization
 
@@ -242,11 +267,12 @@ Grafana Cloud provides high range of possibilities for visualization and analysi
 ### Prerequisites
 
 #### Required Tools
-- Kind (Kubernetes in Docker): v0.20.0+
+- Kind: v0.20.0+
 - kubectl: v1.28.0+
 - Helm: v3.12.0+
 - Podman: v4.0.0+
 - Bash: 4.0+
+- `envsubst` (usually provided by GNU `gettext`)
 
 #### System Requirements
 - OS: macOS, Linux, or Windows (WSL2)
@@ -307,7 +333,8 @@ Grafana Assistant is a Grafana Cloud exclusive feature. Follow these steps to se
 
 1. In your Grafana Cloud portal, go to: **Connections** → **Add new connection**
 2. Search for **"Hosted Prometheus metrics"**
-3. Click on it to see your credentials:
+3. Create a new connection.
+4. Click on it to see your credentials:
    - **Remote Write Endpoint URL**: Copy this (e.g., `https://prometheus-prod-xx-xxx.grafana.net/api/prom/push`)
    - **Username/Instance ID**: Copy this number (e.g., `1234567`)
 
@@ -339,39 +366,205 @@ cd Perf-A
 
 # 2. Create environment configuration
 cp .env.example .env
-# Edit .env and add your Grafana Cloud credentials
+# Edit .env and add your Grafana Cloud credentials if you want cloud integration
 
 # 3. Run setup script
 ./scripts/setup.sh
 ```
 
 The setup script will automatically:
-- Initialize Podman machine
-- Create Kind cluster
-- Install Prometheus
-- Deploy microservices demo
-- Deploy Grafana Agent (if credentials configured)
-- Push metrics to Grafana Cloud
+- Validate that `kind`, `kubectl`, `helm`, `podman`, and `envsubst` are installed
+- Initialize or reuse a Podman machine named `perf-a-podman`
+- Configure the Podman machine to use 8 CPUs and 24576 MB memory when possible
+- Create or reuse a Kind cluster named `perf-a-project`
+- Install the kube-prometheus-stack in the `monitoring` namespace
+- Download and deploy the Google Online Boutique manifests
+- Remove CPU and memory requests/limits from the downloaded manifests before applying them
+- Deploy Grafana Agent in the `grafana-agent` namespace if Grafana Cloud credentials are configured
+- Start a background port-forward for the storefront UI on `http://localhost:8080`
 
 ### What Gets Installed
 
 **Local Kubernetes Cluster:**
-- Prometheus (metrics collection)
-- Grafana Agent (metrics forwarding)
-- Microservices demo application (11 services)
+- Prometheus and Alertmanager in the `monitoring` namespace
+- Grafana Agent in the `grafana-agent` namespace when cloud credentials are configured
+- Google Online Boutique microservices in the `default` namespace
+- Frontend UI exposed locally through `kubectl port-forward` on port 8080
 
 **Grafana Cloud:**
-- Prometheus storage (receives metrics)
-- Grafana interface (visualization)
-- Grafana Assistant (AI features)
+- Prometheus remote write endpoint receiving selected metrics
+- Grafana interface for visualization and exploration
+- Grafana Assistant for AI-assisted analysis
 
 ---
 
 ## 8. Demo Deployment Steps
 
+### a. Configuration Set-up
+
+1. **Get Grafana Cloud Credentials**
+   - Follow steps in Section 6 to create account and get credentials
+   - Add credentials to `.env` file
+
+2. **Verify Prerequisites**
+   ```bash
+   # Check tool versions
+   kind version
+   kubectl version --client
+   helm version
+   podman version
+   ```
+
+3. **Run Setup Script**
+   ```bash
+   ./scripts/setup.sh
+   ```
+
+   The script will:
+   - Initialize or reuse the Podman machine named `perf-a-podman`
+   - Attempt to configure the Podman machine with 8 CPUs and 24576 MB memory
+   - Create or reuse the Kind cluster named `perf-a-project`
+   - Install Prometheus and Alertmanager
+   - Download and patch the Google Online Boutique manifests before deployment
+   - Deploy Grafana Agent if Grafana Cloud credentials are present in `.env`
+   - Start local storefront access on `http://localhost:8080`
+
+4. **Verify Deployment**
+   ```bash
+   # Check all pods are running
+   kubectl get pods -A
+   
+   # Check Prometheus stack
+   kubectl get pods -n monitoring
+   
+   # Check Grafana Agent (if enabled)
+   kubectl get pods -n grafana-agent
+   
+   # Check microservices
+   kubectl get pods -n default
+   ```
+
+### b. Data Preparation
+
+The demo application includes a built-in load generator that automatically creates realistic traffic:
+
+1. **Verify Load Generator**
+   ```bash
+   kubectl get pods | grep loadgenerator
+   ```
+
+2. **Check Traffic Generation**
+   ```bash
+   kubectl logs -f deployment/loadgenerator
+   ```
+
+3. **Wait for Metrics**
+   - Local metrics begin collecting as soon as Prometheus is ready
+   - Wait 2-3 minutes for data to accumulate in Grafana Cloud
+   - Grafana Agent scrapes and forwards metrics every 60 seconds when enabled
+
+4. **Verify Metrics in Grafana Cloud**
+   - Go to your Grafana Cloud instance
+   - Click **Explore** (compass icon)
+   - Try query: `up`
+   - You should see metrics from your local cluster if Grafana Agent was deployed successfully
+
+---
+
 ## 9. Demo Description
 
+### a. Execution Procedure
+
+#### Step 1: Access Grafana Cloud
+
+1. Open browser and go to your Grafana Cloud instance:
+   - URL: `https://yourstack.grafana.net`
+   - (Find your URL in Grafana Cloud portal)
+
+2. Login with your Grafana Cloud credentials
+
+#### Step 2: Verify Metrics Connection
+
+1. Click **Explore** (compass icon in left sidebar)
+2. Select data source: **grafanacloud-[yourname]-prom**
+3. Try a simple query: `up`
+4. Click **Run query**
+5. You should see metrics from your local cluster
+
+
+#### Step 3: Use Grafana Assistant
+
+1. Click the **AI icon** in the top navigation bar
+2. If not visible:
+   - Go to **☰ Menu** → **Apps**
+   - Search for "Grafana Assistant" or "LLM"
+   - Click **Enable**
+   - Refresh the page
+
+3. Try example prompts
+4. Review AI-generated queries and insights
+5. Use generated queries in dashboards
+
+#### Example AI Prompts:
+
+1. **"Show me all running pods"**
+   - Expected: Query generation for `up` metric
+   - Result: List of all pods with their status
+
+2. **"Show me the CPU usage of all pods in the default namespace"**
+   - Expected: PromQL query with rate() and filtering
+   - Result: CPU usage visualization per pod
+
+3. **"Which service has the highest memory consumption?"**
+   - Expected: Comparative analysis query
+   - Result: Ranked list of services by memory
+
+4. **"Are there any performance bottlenecks in the system?"**
+   - Expected: AI-powered bottleneck identification
+   - Result: Analysis of resource constraints and recommendations
+
+5. **"Create a dashboard showing the health of all microservices"**
+   - Expected: Auto-generated comprehensive dashboard
+   - Result: Multi-panel dashboard with key metrics
+
+6. **"Explain this query: rate(container_cpu_usage_seconds_total[5m])"**
+   - Expected: Natural language explanation
+   - Result: Detailed explanation of query components
+
+#### Where to Type Queries in Grafana Cloud
+
+**In Explore:**
+1. Click **Explore** (compass icon) in left sidebar
+2. Select Prometheus data source at top
+3. Type query in the **Metric** field or query editor
+4. Press **Enter** or click **Run query**
+
+**Using AI Assistant:**
+1. Click **AI icon** in top navigation
+2. Type your question in natural language
+3. AI generates the query for you
+4. Click **Run query** to execute
+5. Copy query to use in dashboards
+
+
+---
+### b. Results presentation
+
+#### 1. **Create a dashboard showing Kubernetes cluster status**
+![Dashboard Kubernetes cluster](images/dash-kubernetes-cluster-status.png)
+#### 2. **Create a dashboard showing the health of all microservices**
+ ![Dashboard health microservice](images/dash-microservices-health.png)
+#### 3. **Identify bottlenecks**
+ ![Identify bottlenecks](images/identify-bottlenecks.png)
+#### 4. **Service memory usage**
+ ![Service memory usage](images/service-memory-usage.png)
+
+
+
+
 ## 10. Summary – Conclusions
+
+This project demonstrates how to deploy a containerized microservice application inside a local Kubernetes cluster, establish an efficient telemetry pipeline to Grafana Cloud, and utilize AI automation (Grafana Assistant) to perform application performance analysis and identify system bottlenecks. Our implementation of the local cluster came with some disadvantages and required manual intervention into the setup of the Online Boutique Store. Due to the limitations of the free tier we had to pick out the most important metrics to be send to the Prometheus on the Grafana Cloud side. Despite these limitations we were able to provide examples of Grafana Assistant to describe the state and configuration of the cluster.
 
 ## 11. References
 
@@ -411,7 +604,18 @@ The setup script will automatically:
 kubectl get nodes
 kubectl get pods -A
 
+# Access storefront UI
+open http://localhost:8080
+
 # View logs
 kubectl logs -f <pod-name>
 kubectl logs -n grafana-agent deployment/grafana-agent -f
+
+# Stop storefront port-forward manually
+pkill -f 'port-forward.*8080:80'
+
+# Change Grafana Agent config
+export $(grep -vE '^\s*([#]|$)' .env | xargs)
+envsubst < ./config/grafana-agent-config.yaml | kubectl apply -f -
+kubectl delete pod -n grafana-agent -l app=grafana-agent   
 ```

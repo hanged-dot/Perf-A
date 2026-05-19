@@ -1,0 +1,54 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-agent-config
+  namespace: grafana-agent
+data:
+  agent.yaml: |
+    server:
+      log_level: info
+    
+    metrics:
+      global:
+        scrape_interval: 60s
+        remote_write:
+          - url: ${GRAFANA_CLOUD_PROMETHEUS_URL}
+            basic_auth:
+              username: ${GRAFANA_CLOUD_PROMETHEUS_USERNAME}
+              password: ${GRAFANA_CLOUD_PROMETHEUS_PASSWORD}
+      
+      configs:
+        - name: default
+          scrape_configs:
+            - job_name: 'federate'
+              honor_labels: true
+              metrics_path: '/federate'
+              params:
+                'match[]':
+    
+                  # 1. Microservice Application Metrics (For performance & bottleneck analysis)
+                  - '{__name__=~"grpc_server_handling_seconds_.*|grpc_server_started_total|grpc_server_handled_total"}'
+                  - '{__name__=~"http_server_duration_milliseconds_.*|http_server_requests_total"}'
+                  
+                  # 2. Scope Container Analytics to your active workload namespaces (Eliminates system overhead)
+                  - '{__name__=~"container_cpu_usage_seconds_total|container_memory_working_set_bytes|container_memory_usage_bytes|container_network_receive_bytes_total|container_network_transmit_bytes_total", namespace=~"default|monitoring"}'
+                  
+                  # 3. Kube-State-Metrics (Structural flags that light up the dashboard overview panel items)
+                  - '{__name__=~"kube_pod_status_phase|kube_pod_container_status_restarts_total|kube_pod_container_status_waiting_reason|kube_pod_status_ready"}'
+                  - '{__name__=~"kube_node_status_condition|kube_node_info|kube_pod_info"}'
+                  - '{__name__=~"kube_deployment_status_replicas_available|kube_deployment_status_replicas_unavailable"}'
+                  - '{__name__=~"kube_namespace_status_phase"}'
+                  
+                  # 4. Bare Metal Host Analytics (Provides the physical memory/processor baseline metrics)
+                  - '{__name__=~"node_cpu_seconds_total|node_memory_MemTotal_bytes|node_memory_MemAvailable_bytes|node_filesystem_size_bytes|node_filesystem_free_bytes"}'
+                  
+                  # 5. System Operational Health (Lightweight metrics for the underlying nodes)
+                  - '{__name__=~"apiserver_request_total|apiserver_request_sli_duration_seconds_bucket"}'
+                  
+                  # 6.Pre-calculated Mixin Recording Rules
+                  - '{__name__=~"instance:node_cpu_utilisation:rate5m|instance:node_memory_utilisation:ratio"}'
+                  - '{__name__=~"namespace_cpu:kube_pod_container_resource_requests:sum|namespace_memory:kube_pod_container_resource_requests:sum"}'
+                  - '{__name__=~"apiserver_request:availability30d"}'
+              static_configs:
+                - targets:
+                    - 'monitoring-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090'

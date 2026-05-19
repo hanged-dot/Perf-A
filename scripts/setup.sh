@@ -1,6 +1,6 @@
 #!/bin/bash
 
-set -ex
+set -x
 
 check_tool() {
     if ! command -v $1 &> /dev/null; then
@@ -13,45 +13,46 @@ check_tool kind
 check_tool kubectl
 check_tool helm
 check_tool podman
+check_tool envsubst
 
-echo "Setup podman"
+PODMAN_MACHINE_NAME="perf-a-podman"
 
-if podman machine list | grep -q "Currently running"; then
-    echo "Podman machine is already running"
-    echo "Checking current configuration..."
-    podman machine inspect | grep -E "(CPUs|Memory)" || true
+echo "Setup podman (machine: $PODMAN_MACHINE_NAME)"
+
+if podman machine list | grep -q "$PODMAN_MACHINE_NAME.*Currently running"; then
+    echo "Podman machine '$PODMAN_MACHINE_NAME' is already running"
+    echo "Checking current configuration"
+    podman machine inspect "$PODMAN_MACHINE_NAME" | grep -E "(CPUs|Memory)" || true
 else
-    if ! podman machine list | grep -q "podman-machine-default"; then
-        echo "Initializing podman machine..."
-        podman machine init || true
+    if ! podman machine list | grep -q "$PODMAN_MACHINE_NAME"; then
+        echo "Initializing podman machine '$PODMAN_MACHINE_NAME'"
+        podman machine init "$PODMAN_MACHINE_NAME" || true
     fi
     
-    echo "Configuring podman machine (CPUs: 4, Memory: 6144MB)..."
-    if podman machine set --cpus 4 --memory 6144 2>/dev/null; then
+    echo "Configuring podman machine (CPUs: 8, Memory: 24576MB)"
+    if podman machine set "$PODMAN_MACHINE_NAME" --cpus 8 --memory 24576 2>/dev/null; then
         echo "Configuration updated successfully"
     else
         echo "Warning: Could not update configuration (machine may be running)"
         echo "Current configuration will be used"
     fi
     
-    echo "Starting podman machine..."
-    podman machine start || true
+    echo "Starting podman machine '$PODMAN_MACHINE_NAME'"
+    podman machine start "$PODMAN_MACHINE_NAME" || true
 fi
 
-if ! podman machine list | grep -q "Currently running"; then
-    echo "Error: Podman machine is not running"
-    echo "Please run: podman machine stop && podman machine start"
+if ! podman machine list | grep -q "$PODMAN_MACHINE_NAME.*Currently running"; then
+    echo "Error: Podman machine '$PODMAN_MACHINE_NAME' is not running"
+    echo "Please run: podman machine stop $PODMAN_MACHINE_NAME && podman machine start $PODMAN_MACHINE_NAME"
     exit 1
 fi
 
 export KIND_EXPERIMENTAL_PROVIDER=podman
 
-
 if [ ! -f .env ]; then
     echo "File .env not defined. Please use template .env.example to create one"
     exit 1
 else
-    # Source .env file safely
     set +x
     while IFS='=' read -r key value; do
         [[ $key =~ ^#.*$ ]] && continue
@@ -79,14 +80,14 @@ echo "Update Helm"
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts 2>/dev/null || echo "Prometheus repo already added"
 helm repo add grafana https://grafana.github.io/helm-charts 2>/dev/null || echo "Grafana repo already added"
 
-echo "Updating Helm repositories (this may take a moment)..."
+echo "Updating Helm repositories (this may take a moment)"
 if ! helm repo update --timeout 5m; then
     echo "Warning: Helm repo update timed out or failed"
-    echo "Continuing with cached repository data..."
+    echo "Continuing with cached repository data"
     echo "If installation fails, check your internet connection and try again"
 fi
 
-echo "Install Prometheus..."
+echo "Install Prometheus"
 
 helm upgrade --install monitoring prometheus-community/kube-prometheus-stack \
     --namespace monitoring --create-namespace \
@@ -96,9 +97,31 @@ helm upgrade --install monitoring prometheus-community/kube-prometheus-stack \
     --wait --timeout=10m
 
 echo "Apply microservice"
-kubectl apply -f https://raw.githubusercontent.com/GoogleCloudPlatform/microservices-demo/main/release/kubernetes-manifests.yaml
+#kubectl apply -f https://raw.githubusercontent.com/GoogleCloudPlatform/microservices-demo/main/release/kubernetes-manifests.yaml
+MANIFEST_FILE="./.temp/boutique-manifests.yaml"
+URL="https://raw.githubusercontent.com/GoogleCloudPlatform/microservices-demo/main/release/kubernetes-manifests.yaml"
 
-echo "Waiting for Prometheus to be ready..."
+echo "Download Google Online Boutiqusce manifests"
+curl -Lo "$MANIFEST_FILE" "$URL"
+
+echo "Stripping CPU and Memory resource limits/requests and applying changed manifest"
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    sed -i '' '/resources:/d' "$MANIFEST_FILE"
+    sed -i '' '/limits:/d' "$MANIFEST_FILE"
+    sed -i '' '/requests:/d' "$MANIFEST_FILE"
+    sed -i '' '/cpu:/d' "$MANIFEST_FILE"
+    sed -i '' '/memory:/d' "$MANIFEST_FILE"
+else
+    sed -i '/resources:/d' "$MANIFEST_FILE"
+    sed -i '/limits:/d' "$MANIFEST_FILE"
+    sed -i '/requests:/d' "$MANIFEST_FILE"
+    sed -i '/cpu:/d' "$MANIFEST_FILE"
+    sed -i '/memory:/d' "$MANIFEST_FILE"
+fi
+kubectl apply -f "$MANIFEST_FILE"
+kubectl rollout restart deployment -n default
+
+echo "Waiting for Prometheus to be ready"
 kubectl wait --for=condition=ready --timeout=300s pod -l app.kubernetes.io/name=prometheus -n monitoring
 
 echo ""
@@ -123,100 +146,26 @@ if [ -z "$GRAFANA_CLOUD_PROMETHEUS_URL" ] || [ -z "$GRAFANA_CLOUD_PROMETHEUS_USE
     echo "   GRAFANA_CLOUD_PROMETHEUS_PASSWORD=your_metrics_token"
     echo ""
     echo "3. Run this script again to deploy Grafana Agent"
-    echo ""
-    echo "See docs/QUICK_START_HYBRID.md for detailed instructions"
-    echo ""
 else
-    echo "✓ Grafana Cloud Prometheus credentials found"
+    echo "Grafana Cloud Prometheus credentials found"
     echo "  URL: $GRAFANA_CLOUD_PROMETHEUS_URL"
     echo "  Username: $GRAFANA_CLOUD_PROMETHEUS_USERNAME"
     echo ""
-    echo "Deploying Grafana Agent..."
+    echo "Deploying Grafana Agent"
     
-    # Create namespace
     kubectl create namespace grafana-agent --dry-run=client -o yaml | kubectl apply -f -
-    
-    # Create secret
     kubectl create secret generic grafana-cloud-credentials \
         --from-literal=username="$GRAFANA_CLOUD_PROMETHEUS_USERNAME" \
         --from-literal=password="$GRAFANA_CLOUD_PROMETHEUS_PASSWORD" \
         --namespace=grafana-agent \
         --dry-run=client -o yaml | kubectl apply -f -
     
-    # Create ConfigMap
-    cat <<EOF | kubectl apply -f -
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: grafana-agent-config
-  namespace: grafana-agent
-data:
-  agent.yaml: |
-    server:
-      log_level: info
+    envsubst < ./config/grafana-agent-config.yaml | kubectl apply -f -
+    kubectl apply -f ./config/grafana-agent-deployment.yaml
     
-    metrics:
-      global:
-        scrape_interval: 60s
-        remote_write:
-          - url: ${GRAFANA_CLOUD_PROMETHEUS_URL}
-            basic_auth:
-              username: ${GRAFANA_CLOUD_PROMETHEUS_USERNAME}
-              password: ${GRAFANA_CLOUD_PROMETHEUS_PASSWORD}
-      
-      configs:
-        - name: default
-          scrape_configs:
-            - job_name: 'federate'
-              honor_labels: true
-              metrics_path: '/federate'
-              params:
-                'match[]':
-                  - '{__name__=~".+"}'
-              static_configs:
-                - targets:
-                    - 'monitoring-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090'
-EOF
-    
-    # Deploy Grafana Agent
-    cat <<EOF | kubectl apply -f -
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: grafana-agent
-  namespace: grafana-agent
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: grafana-agent
-  template:
-    metadata:
-      labels:
-        app: grafana-agent
-    spec:
-      containers:
-        - name: grafana-agent
-          image: grafana/agent:latest
-          args:
-            - -config.file=/etc/agent/agent.yaml
-            - -server.http.address=0.0.0.0:12345
-          ports:
-            - containerPort: 12345
-              name: http-metrics
-          volumeMounts:
-            - name: config
-              mountPath: /etc/agent
-      volumes:
-        - name: config
-          configMap:
-            name: grafana-agent-config
-EOF
-    
-    echo "Waiting for Grafana Agent to be ready..."
-    kubectl wait --for=condition=available --timeout=300s deployment/grafana-agent -n grafana-agent
-    
-    echo "✓ Grafana Agent deployed successfully"
+    echo "Waiting for Grafana Agent to be read"
+    kubectl wait --for=condition=available --timeout=300s deployment/grafana-agent -n grafana-agent || echo " The request could have timed out, check the pod status,you may need to wait a bit more"
+    echo "Grafana Agent deployed successfully"
 fi
 
 # Final summary
@@ -225,9 +174,9 @@ echo "=========================================="
 echo "Setup Complete!"
 echo "=========================================="
 echo ""
-echo "✓ KIND cluster: perf-a-project"
-echo "✓ Prometheus: monitoring namespace"
-echo "✓ Microservices: default namespace"
+echo "KIND cluster: perf-a-project"
+echo "Prometheus namespace: monitoring"
+echo "Microservices namespace: default"
 
 if [ ! -z "$GRAFANA_CLOUD_PROMETHEUS_URL" ]; then
     echo "✓ Grafana Agent: pushing metrics to Grafana Cloud"
@@ -236,9 +185,8 @@ if [ ! -z "$GRAFANA_CLOUD_PROMETHEUS_URL" ]; then
     echo "1. Go to your Grafana Cloud instance"
     echo "2. Click Explore (compass icon)"
     echo "3. Query: up"
-    echo "4. Use Grafana Assistant (AI icon ✨)"
+    echo "4. Use Grafana Assistant (AI icon)"
     echo ""
-    echo "See docs/GRAFANA_CLOUD_USAGE_GUIDE.md for detailed usage instructions"
 else
     echo "⚠ Grafana Agent: not deployed (missing credentials)"
     echo ""
@@ -254,9 +202,16 @@ echo "Useful commands:"
 echo "  - Check all pods: kubectl get pods -A"
 echo "  - Check Prometheus: kubectl get pods -n monitoring"
 echo "  - Check microservices: kubectl get pods -n default"
+echo "  - Check Online Boutique Store UI run: kubectl port-forward -n default service/frontend-external 8080:80"
 if [ ! -z "$GRAFANA_CLOUD_PROMETHEUS_URL" ]; then
     echo "  - Check Grafana Agent: kubectl get pods -n grafana-agent"
     echo "  - View agent logs: kubectl logs -n grafana-agent deployment/grafana-agent -f"
 fi
 echo "  - Cleanup everything: ./scripts/cleanup.sh"
+echo "=========================================="
+echo "Launching Online Boutique Store UI port-forwarding in the background"
+pkill -f "port-forward.*8080:80" || true
+nohup kubectl port-forward -n default service/frontend-external 8080:80 > /dev/null 2>&1 &
+echo "Frontend UI is running at: http://localhost:8080"
+echo "To stop it later, run: pkill -f 'port-forward.*8080:80'"
 echo "=========================================="
