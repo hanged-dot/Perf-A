@@ -165,8 +165,8 @@ Online Boutique is a cloud-first microservices demo application. The application
 ### Observability
 The observability stack consists of:
 
-1. Metrics Collection: Prometheus scrapes metrics from all Kubernetes pods and services locally
-2. Data Forwarding: Grafana Agent forwards metrics to Grafana Cloud
+1. Metrics Collection: Prometheus scrapes metrics from Kubernetes workloads and cluster components locally
+2. Data Forwarding: Grafana Agent federates selected metrics from Prometheus and forwards them to Grafana Cloud
 3. Data Storage: Time-series data stored in Grafana Cloud Prometheus
 4. Visualization: Grafana Cloud dashboards display metrics in real-time
 5. AI Analysis: Grafana Assistant provides intelligent insights
@@ -249,16 +249,78 @@ Grafana Cloud provides high range of possibilities for visualization and analysi
 
 ## 5. Case Study Detailed Architecture
 
+
 ### Component Interactions
 
 ```
+┌──────────────┐
+│ User Browser │
+└──────┬───────┘
+       │ HTTPS
+       ▼
+┌──────────────────────────────────────┐
+│ Grafana Cloud                        │
+│ https://[yourstack].grafana.net      │
+│                                      │
+│  ┌────────────────────────────────┐  │
+│  │ Grafana UI + AI Assistant      │  │
+│  └────────┬───────────────────────┘  │
+│           │ PromQL Queries           │
+│           ▼                          │
+│  ┌────────────────────────────────┐  │
+│  │ Prometheus Storage             │  │
+│  │ (Cloud-hosted)                 │  │
+│  └────────┬───────────────────────┘  │
+└───────────┼──────────────────────────┘
+            ▲ Remote Write (HTTPS)
+            │
+┌───────────┴───────────────────────────┐
+│ Local Kubernetes Cluster              │
+│                                       │
+│  ┌────────────────────────────────┐   │
+│  │ Grafana Agent                  │   │
+│  │ (Metrics Forwarder)            │   │
+│  └────────┬───────────────────────┘   │
+│           │ Federation/Scrape         │
+│           ▼                           │
+│  ┌────────────────────────────────┐   │
+│  │ Prometheus                     │   │
+│  │ (Local Time Series DB)         │   │
+│  └────────┬───────────────────────┘   │
+│           │ Scrape Metrics            │
+│           │ (every 15s)               │
+│           ▼                           │
+│  ┌────────────────────────────────┐   │
+│  │ Kubernetes Service Discovery   │   │
+│  │ (ServiceMonitors, PodMonitors) │   │
+│  └────────┬───────────────────────┘   │
+└───────────┼───────────────────────────┘
+            │
+     ┌──────┴──────┬──────────┐
+     ▼             ▼          ▼
+┌─────────┐  ┌─────────┐  ┌─────────┐
+│Frontend │  │Product  │  │Cart     │
+│Service  │◄─┤Catalog  │◄─┤Service  │
+│(Metrics)│  │(Metrics)│  │(Metrics)│
+└─────────┘  └─────────┘  └─────────┘
+     │             │          │
+     └─────────────┼──────────┘
+                   │
+          ┌────────▼────────┐
+          │ Load Generator  │
+          │ (Traffic Sim)   │
+          └─────────────────┘
 ```
-
 
 ### Data Flow
 
-```
-```
+1. **Metrics Generation**: Microservices and Kubernetes components expose metrics endpoints
+2. **Local Collection**: Prometheus scrapes and stores metrics locally
+3. **Local Storage**: Metrics are retained temporarily in the local Prometheus instance
+4. **Metrics Forwarding**: Grafana Agent federates selected metrics from Prometheus and pushes them to Grafana Cloud
+5. **Cloud Storage**: Metrics stored in Grafana Cloud Prometheus
+6. **Visualization**: Users access Grafana Cloud to query and visualize
+7. **AI Analysis**: Grafana Assistant analyzes patterns and provides insights
 
 ---
 
@@ -289,20 +351,19 @@ Create from `.env.example`:
 cp .env.example .env
 ```
 
-**Required variables:**
+**Variables used by the current setup:**
 
 ```bash
-# Grafana Cloud Prometheus Configuration (Required)
+# Grafana Cloud Prometheus Configuration (Required only if you want Grafana Cloud integration)
 # Get these from: Grafana Cloud → Connections → Hosted Prometheus metrics
 # Example: https://prometheus-prod-xx-xxx.grafana.net/api/prom/push
 GRAFANA_CLOUD_PROMETHEUS_URL=[REPLACE_PROMETHEUS_REMOTE_WRITE_URL]
 GRAFANA_CLOUD_PROMETHEUS_USERNAME=[REPLACE_INSTANCE_ID]
 # Create via: Administration → Access Policies → Create access policy with metrics:write scope
 GRAFANA_CLOUD_PROMETHEUS_PASSWORD=[REPLACE_METRICS_API_TOKEN]
-
-# Optional: OpenAI API Key (for enhanced AI features)
-OPENAI_API_KEY=[REPLACE_OPENAI_API_KEY]
 ```
+
+If these variables are not provided, [`./scripts/setup.sh`](scripts/setup.sh) still deploys the local cluster and monitoring stack, but skips Grafana Agent deployment.
 
 > [!CAUTION]
 >  Never commit `.env` file to version control!
